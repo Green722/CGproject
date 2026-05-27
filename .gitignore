@@ -1,0 +1,35 @@
+# Visual Studio
+.vs/
+Debug/
+Release/
+x64/
+x86/
+*.user
+*.suo
+*.sln.docstates
+*.vcxproj.user
+*.vcxproj.filters
+
+# 编译中间文件
+*.obj
+*.pdb
+*.ilk
+*.log
+*.tlog
+*.idb
+*.ipdb
+*.iobj
+*.ipch
+
+# NuGet 包（体积大，可自动还原）
+packages/
+
+# 临时文件
+*.bmp
+*.png
+*.exe
+screenshot*.bmp
+
+# 系统文件
+Thumbs.db
+.DS_Store
