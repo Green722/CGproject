@@ -630,27 +630,32 @@ static void buildOrb(){
 struct Particle{ glm::vec3 pos,vel; float life,maxLife,size; };
 std::vector<Particle> particles;
 GLuint partVAO,partVBO;
-glm::vec3 fireOrigin(9.0f,1.6f,-7.5f);
+// Two fire pits — one per room, in the middle of each room.
+glm::vec3 fireOrigins[2] = {
+    glm::vec3(-13.0f, 0.4f,  5.0f),  // room 1: northwest area
+    glm::vec3( 13.0f, 0.4f, -5.0f)   // room 2: southeast area
+};
 
-static void spawnParticle(){
+static void spawnParticle(int idx){
     Particle p;
-    float rx=(rand()%100-50)/300.0f, rz=(rand()%100-50)/300.0f;
-    p.pos=fireOrigin+glm::vec3(rx,0,rz);
-    p.vel={( rand()%100-50)/80.0f, 1.4f+(rand()%100)/200.0f, (rand()%100-50)/80.0f};
-    p.maxLife=p.life=0.7f+(rand()%100)/200.0f;
-    p.size=14.0f+(rand()%8);
+    float rx=(rand()%100-50)/200.0f, rz=(rand()%100-50)/200.0f;
+    p.pos=fireOrigins[idx]+glm::vec3(rx,0,rz);
+    p.vel={(rand()%100-50)/70.0f, 2.0f+(rand()%100)/150.0f, (rand()%100-50)/70.0f};
+    p.maxLife=p.life=1.0f+(rand()%100)/180.0f;
+    p.size=42.0f;
     particles.push_back(p);
 }
 static void updateParticles(float dt){
-    for(int i=0;i<6;i++) spawnParticle();
+    // 5 particles per fire per frame
+    for(int i=0;i<5;i++){ spawnParticle(0); spawnParticle(1); }
     for(auto& p:particles){
         p.life-=dt; p.pos+=p.vel*dt;
         p.vel.x*=0.97f; p.vel.z*=0.97f;
-        p.size=14.0f*(p.life/p.maxLife);
+        p.size=42.0f*(p.life/p.maxLife);
     }
     particles.erase(std::remove_if(particles.begin(),particles.end(),
         [](const Particle& p){return p.life<=0;}),particles.end());
-    if(particles.size()>400) particles.erase(particles.begin(),particles.begin()+50);
+    if(particles.size()>800) particles.erase(particles.begin(),particles.begin()+100);
 }
 static void initPartVAO(){
     glGenVertexArrays(1,&partVAO); glGenBuffers(1,&partVBO);
@@ -900,8 +905,31 @@ void motion(int x,int y){
     mouseOldX=x; mouseOldY=y;
     glutPostRedisplay();
 }
-void keyDown(unsigned char k,int,int){ keys[k]=true; if(k==27) exit(0); }
-void keyUp  (unsigned char k,int,int){ keys[k]=false; }
+void keyDown(unsigned char k,int,int){
+    if(k>='A'&&k<='Z') k=(unsigned char)(k+('a'-'A')); // accept Caps Lock too
+    keys[k]=true; if(k==27) exit(0);
+}
+void keyUp(unsigned char k,int,int){
+    if(k>='A'&&k<='Z') k=(unsigned char)(k+('a'-'A'));
+    keys[k]=false;
+}
+// Arrow keys / PgUp / PgDn — backup controls in case an IME steals letter keys.
+void specialDown(int k,int,int){
+    if(k==GLUT_KEY_UP)        keys['w']=true;
+    else if(k==GLUT_KEY_DOWN) keys['s']=true;
+    else if(k==GLUT_KEY_LEFT) keys['a']=true;
+    else if(k==GLUT_KEY_RIGHT)keys['d']=true;
+    else if(k==GLUT_KEY_PAGE_UP)   keys['q']=true;
+    else if(k==GLUT_KEY_PAGE_DOWN) keys['e']=true;
+}
+void specialUp(int k,int,int){
+    if(k==GLUT_KEY_UP)        keys['w']=false;
+    else if(k==GLUT_KEY_DOWN) keys['s']=false;
+    else if(k==GLUT_KEY_LEFT) keys['a']=false;
+    else if(k==GLUT_KEY_RIGHT)keys['d']=false;
+    else if(k==GLUT_KEY_PAGE_UP)   keys['q']=false;
+    else if(k==GLUT_KEY_PAGE_DOWN) keys['e']=false;
+}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -951,6 +979,8 @@ int main(int argc,char** argv){
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyDown);
     glutKeyboardUpFunc(keyUp);
+    glutSpecialFunc(specialDown);
+    glutSpecialUpFunc(specialUp);
     glutMouseFunc(mouse);
     glutMotionFunc(motion);
     glutIdleFunc([](){glutPostRedisplay();});
