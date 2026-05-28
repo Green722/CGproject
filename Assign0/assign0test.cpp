@@ -979,6 +979,8 @@ int main(int argc,char** argv){
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyDown);
     glutKeyboardUpFunc(keyUp);
+    glutSpecialFunc(specialDown);
+    glutSpecialUpFunc(specialUp);
     glutMouseFunc(mouse);
     glutMotionFunc(motion);
     glutIdleFunc([](){glutPostRedisplay();});
