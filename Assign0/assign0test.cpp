@@ -47,8 +47,11 @@ struct Vertex {        // scene geometry
 struct ColorVertex {   // actor + ball
     float x,y,z, nx,ny,nz, r,g,b;
 };
-struct ParticleVert {  // fire particles
-    float x,y,z, size, r,g,b,a;
+struct ParticleVert {  // fire particles (view-space billboard quad)
+    float cx,cy,cz;    // particle world center (same for all 6 corners)
+    float ox,oy;       // corner offset in view space (-0.5..+0.5)
+    float size;        // world-space half-extent
+    float r,g,b,a;
 };
 
 // ---------------------------------------------------------------------------
@@ -219,27 +222,31 @@ static const char* shadowFS = R"(
 void main(){}
 )";
 
-// ---- Particle shader ----
+// ---- Particle shader (view-space billboard quads) ----
 static const char* partVS = R"(
 #version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in float aSize;
-layout(location=2) in vec4 aColor;
+layout(location=0) in vec3 aCenter;
+layout(location=1) in vec2 aOffset;
+layout(location=2) in float aSize;
+layout(location=3) in vec4 aColor;
 out vec4 pColor;
+out vec2 pUV;
 uniform mat4 proj, view;
 void main(){
-    gl_Position = proj*view*vec4(aPos,1);
-    gl_PointSize = aSize;
+    vec4 vc = view * vec4(aCenter, 1.0);
+    vc.xy += aOffset * aSize;
+    gl_Position = proj * vc;
     pColor = aColor;
+    pUV = aOffset;
 }
 )";
 static const char* partFS = R"(
 #version 330 core
 in vec4 pColor;
+in vec2 pUV;
 out vec4 fragColor;
 void main(){
-    vec2 c = gl_PointCoord - 0.5;
-    float r = length(c);
+    float r = length(pUV);
     if(r > 0.5) discard;
     float a = pColor.a * (1.0 - r*2.0);
     fragColor = vec4(pColor.rgb, a);
@@ -638,20 +645,19 @@ glm::vec3 fireOrigins[2] = {
 
 static void spawnParticle(int idx){
     Particle p;
-    float rx=(rand()%100-50)/200.0f, rz=(rand()%100-50)/200.0f;
+    float rx=(rand()%100-50)/250.0f, rz=(rand()%100-50)/250.0f;
     p.pos=fireOrigins[idx]+glm::vec3(rx,0,rz);
     p.vel={(rand()%100-50)/70.0f, 2.0f+(rand()%100)/150.0f, (rand()%100-50)/70.0f};
     p.maxLife=p.life=1.0f+(rand()%100)/180.0f;
-    p.size=42.0f;
+    p.size=0.55f;  // world units
     particles.push_back(p);
 }
 static void updateParticles(float dt){
-    // 5 particles per fire per frame
     for(int i=0;i<5;i++){ spawnParticle(0); spawnParticle(1); }
     for(auto& p:particles){
         p.life-=dt; p.pos+=p.vel*dt;
         p.vel.x*=0.97f; p.vel.z*=0.97f;
-        p.size=42.0f*(p.life/p.maxLife);
+        p.size=0.55f*(p.life/p.maxLife);
     }
     particles.erase(std::remove_if(particles.begin(),particles.end(),
         [](const Particle& p){return p.life<=0;}),particles.end());
@@ -661,10 +667,11 @@ static void initPartVAO(){
     glGenVertexArrays(1,&partVAO); glGenBuffers(1,&partVBO);
     glBindVertexArray(partVAO);
     glBindBuffer(GL_ARRAY_BUFFER,partVBO);
-    glBufferData(GL_ARRAY_BUFFER,500*sizeof(ParticleVert),nullptr,GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)0);
-    glEnableVertexAttribArray(1); glVertexAttribPointer(1,1,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)(3*4));
-    glEnableVertexAttribArray(2); glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)(4*4));
+    glBufferData(GL_ARRAY_BUFFER,6000*sizeof(ParticleVert),nullptr,GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)0);          // center
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)(3*4));      // offset
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2,1,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)(5*4));      // size
+    glEnableVertexAttribArray(3); glVertexAttribPointer(3,4,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)(6*4));      // color
     glBindVertexArray(0);
 }
 
@@ -850,10 +857,20 @@ void display(){
 
     // -- Particles (fire) --
     if(!particles.empty()){
+        static const float corner[6][2] = {
+            {-0.5f,-0.5f},{ 0.5f,-0.5f},{ 0.5f, 0.5f},
+            {-0.5f,-0.5f},{ 0.5f, 0.5f},{-0.5f, 0.5f}
+        };
         std::vector<ParticleVert> pv;
+        pv.reserve(particles.size()*6);
         for(const auto& p:particles){
             float t=p.life/p.maxLife;
-            pv.push_back({p.pos.x,p.pos.y,p.pos.z, p.size, 1.0f, t*0.55f, 0.0f, t*0.9f});
+            float r=1.0f, g=t*0.55f, b=0.0f, a=t*0.9f;
+            for(int k=0;k<6;k++){
+                pv.push_back({p.pos.x,p.pos.y,p.pos.z,
+                              corner[k][0],corner[k][1],
+                              p.size, r,g,b,a});
+            }
         }
         glUseProgram(progParticle);
         glUniformMatrix4fv(glGetUniformLocation(progParticle,"proj"),1,GL_FALSE,glm::value_ptr(proj));
@@ -862,9 +879,9 @@ void display(){
         glBindBuffer(GL_ARRAY_BUFFER,partVBO);
         glBufferData(GL_ARRAY_BUFFER,pv.size()*sizeof(ParticleVert),pv.data(),GL_DYNAMIC_DRAW);
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE);
-        glDepthMask(GL_FALSE); glEnable(GL_PROGRAM_POINT_SIZE);
-        glDrawArrays(GL_POINTS,0,(int)pv.size());
-        glDepthMask(GL_TRUE); glDisable(GL_BLEND); glDisable(GL_PROGRAM_POINT_SIZE);
+        glDepthMask(GL_FALSE);
+        glDrawArrays(GL_TRIANGLES,0,(int)pv.size());
+        glDepthMask(GL_TRUE); glDisable(GL_BLEND);
     }
 
     // -- Glass panels (transparent, last) --
