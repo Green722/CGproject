@@ -1,3 +1,9 @@
+/*
+ * COMP4033 Final Project
+ * 6 effects: Phong specular (#5), visible lights (#7), animated ball (#2),
+ *            transparent glass (#4), particle fire (#3), shadow mapping (#6)
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,597 +19,941 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 
-// 窗口大小
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// ---------------------------------------------------------------------------
+// Window / camera
+// ---------------------------------------------------------------------------
 int windowWidth = 1024, windowHeight = 768;
+glm::vec3 cameraPos(-8.0f, 2.5f, 0.0f);
+float     cameraYaw = -90.0f, cameraPitch = 0.0f;
+bool      mouseDown = false;
+int       mouseOldX, mouseOldY;
+float     moveSpeed = 6.0f;
+int       lastTime  = 0;
+bool      keys[256] = {};
+glm::mat4 currentView;
 
-// 着色器程序
-GLuint shaderProgram;
-GLuint projectionLoc, modelviewLoc, texLoc;
-
-// 纹理 ID
-GLuint floorTex, wallTex, ceilingTex;
-
-// 相机控制
-glm::vec3 cameraPos = glm::vec3(-8.0f, 2.5f, 0.0f);
-float cameraYaw = -90.0f;
-float cameraPitch = 0.0f;
-bool mouseDown = false;
-int mouseOldX, mouseOldY;
-float moveSpeed = 6.0f;
-int lastTime = 0;
-bool keys[256] = { false };
-glm::mat4 currentView;  // 存储当前相机视图矩阵
-
-// 几何数据
-struct Vertex {
-    float x, y, z;
-    float u, v;
+// ---------------------------------------------------------------------------
+// Vertex formats
+// ---------------------------------------------------------------------------
+struct Vertex {        // scene geometry
+    float x,y,z, nx,ny,nz, u,v;
 };
-std::vector<Vertex> floorVerts;
-std::vector<Vertex> ceilingVerts;
-std::vector<Vertex> wallVerts;
-
-// ========== 演员定义 ==========
-struct Actor {
-    glm::vec3 position;
+struct ColorVertex {   // actor + ball
+    float x,y,z, nx,ny,nz, r,g,b;
 };
-Actor actor;
-std::vector<glm::vec3> path;
-int currentPathIndex = 0;
-float pathT = 0.0f;
-float actorSpeed = 0.8f;   // 移动速度 (米/秒)
-
-// 演员专用的着色器程序
-GLuint actorShader;
-GLuint actorProjectionLoc, actorModelviewLoc;
-
-// 演员顶点数据（立方体拼凑）
-struct ColorVertex {
-    float x, y, z;
-    float r, g, b;
+struct ParticleVert {  // fire particles
+    float x,y,z, size, r,g,b,a;
 };
-std::vector<ColorVertex> actorVertices;
-GLuint actorVAO, actorVBO;
-int actorVertexCount;
 
-// 添加一个彩色立方体到 actorVertices
-void addColoredCube(const glm::vec3& center, const glm::vec3& size, const glm::vec3& color) {
-    float x1 = center.x - size.x / 2, x2 = center.x + size.x / 2;
-    float y1 = center.y - size.y / 2, y2 = center.y + size.y / 2;
-    float z1 = center.z - size.z / 2, z2 = center.z + size.z / 2;
-    auto addQuad = [&](float xa, float ya, float za, float xb, float yb, float zb, float xc, float yc, float zc, float xd, float yd, float zd) {
-        actorVertices.push_back({ xa, ya, za, color.r, color.g, color.b });
-        actorVertices.push_back({ xb, yb, zb, color.r, color.g, color.b });
-        actorVertices.push_back({ xc, yc, zc, color.r, color.g, color.b });
-        actorVertices.push_back({ xa, ya, za, color.r, color.g, color.b });
-        actorVertices.push_back({ xc, yc, zc, color.r, color.g, color.b });
-        actorVertices.push_back({ xd, yd, zd, color.r, color.g, color.b });
-        };
-    // 前面 (z = z2)
-    addQuad(x1, y1, z2, x2, y1, z2, x2, y2, z2, x1, y2, z2);
-    // 后面 (z = z1)
-    addQuad(x2, y1, z1, x1, y1, z1, x1, y2, z1, x2, y2, z1);
-    // 左面 (x = x1)
-    addQuad(x1, y1, z1, x1, y1, z2, x1, y2, z2, x1, y2, z1);
-    // 右面 (x = x2)
-    addQuad(x2, y1, z2, x2, y1, z1, x2, y2, z1, x2, y2, z2);
-    // 下面 (y = y1)
-    addQuad(x1, y1, z1, x2, y1, z1, x2, y1, z2, x1, y1, z2);
-    // 上面 (y = y2)
-    addQuad(x1, y2, z2, x2, y2, z2, x2, y2, z1, x1, y2, z1);
+// ---------------------------------------------------------------------------
+// Shader source strings
+// ---------------------------------------------------------------------------
+
+// ---- Room shader (Phong + texture + shadow) ----
+static const char* roomVS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec2 aUV;
+out vec3 fPos;
+out vec3 fNorm;
+out vec2 fUV;
+out vec4 fPosLS;
+uniform mat4 proj, view, model, lightSpaceMat;
+void main(){
+    vec4 wp = model * vec4(aPos,1);
+    fPos  = wp.xyz;
+    fNorm = normalize(mat3(transpose(inverse(model))) * aNormal);
+    fUV   = aUV;
+    fPosLS = lightSpaceMat * wp;
+    gl_Position = proj * view * wp;
+}
+)";
+
+static const char* roomFS = R"(
+#version 330 core
+in vec3 fPos; in vec3 fNorm; in vec2 fUV; in vec4 fPosLS;
+out vec4 fragColor;
+uniform sampler2D tex;
+uniform sampler2D shadowMap;
+uniform vec3 lightPos[3];
+uniform vec3 lightColor[3];
+uniform vec3 viewPos;
+uniform bool useShadow;
+uniform float sceneTime;
+
+// Shadow mapping (#6) - fixed: explicit vec2 cast for textureSize
+float shadowFactor(vec4 ls, vec3 n, vec3 ld){
+    vec3 p = ls.xyz / ls.w * 0.5 + 0.5;
+    if(p.z > 1.0) return 0.0;
+    float bias = max(0.005*(1.0-dot(n,ld)), 0.001);
+    float shadow = 0.0;
+    vec2 ts = vec2(1.0) / vec2(textureSize(shadowMap,0));
+    for(int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){
+        float d = texture(shadowMap, p.xy+vec2(x,y)*ts).r;
+        shadow += (p.z - bias > d) ? 1.0 : 0.0;
+    }
+    return shadow / 9.0;
 }
 
-// 创建演员模型（立方体拼成的简单人形）
-void createActorModel() {
-    actorVertices.clear();
-    // 身体 (棕色)
-    glm::vec3 bodyCenter(0, 0.6f, 0);
-    glm::vec3 bodySize(0.6f, 1.0f, 0.4f);
-    addColoredCube(bodyCenter, bodySize, glm::vec3(0.6f, 0.4f, 0.2f));
-    // 头 (浅棕色)
-    glm::vec3 headCenter(0, 1.2f, 0);
-    glm::vec3 headSize(0.5f, 0.5f, 0.4f);
-    addColoredCube(headCenter, headSize, glm::vec3(0.9f, 0.7f, 0.4f));
-    // 左臂 (蓝色)
-    glm::vec3 leftArmCenter(-0.45f, 0.9f, 0);
-    glm::vec3 armSize(0.3f, 0.6f, 0.3f);
-    addColoredCube(leftArmCenter, armSize, glm::vec3(0.2f, 0.4f, 0.8f));
-    // 右臂
-    glm::vec3 rightArmCenter(0.45f, 0.9f, 0);
-    addColoredCube(rightArmCenter, armSize, glm::vec3(0.2f, 0.4f, 0.8f));
-    // 左腿 (深蓝)
-    glm::vec3 leftLegCenter(-0.2f, 0.1f, 0);
-    glm::vec3 legSize(0.3f, 0.5f, 0.3f);
-    addColoredCube(leftLegCenter, legSize, glm::vec3(0.1f, 0.2f, 0.5f));
-    // 右腿
-    glm::vec3 rightLegCenter(0.2f, 0.1f, 0);
-    addColoredCube(rightLegCenter, legSize, glm::vec3(0.1f, 0.2f, 0.5f));
-    actorVertexCount = actorVertices.size();
+void main(){
+    vec3 n = normalize(fNorm);
 
-    glGenVertexArrays(1, &actorVAO);
-    glGenBuffers(1, &actorVBO);
-    glBindVertexArray(actorVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, actorVBO);
-    glBufferData(GL_ARRAY_BUFFER, actorVertices.size() * sizeof(ColorVertex), actorVertices.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ColorVertex), (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(ColorVertex), (void*)(3 * sizeof(float)));
-    glBindVertexArray(0);
-}
+    // Dynamic texture (#1): scroll floor UV with time
+    vec2 uv = fUV;
+    if(n.y > 0.7) uv += vec2(sceneTime*0.012, sceneTime*0.007);
+    vec3 tc = texture(tex, uv).rgb;
 
-// 演员专用着色器（位置+颜色）
-GLuint createActorShader() {
-    const char* vertSrc =
-        "#version 330 core\n"
-        "layout(location=0) in vec3 aPos;\n"
-        "layout(location=1) in vec3 aColor;\n"
-        "out vec3 vColor;\n"
-        "uniform mat4 projection;\n"
-        "uniform mat4 modelview;\n"
-        "void main() {\n"
-        "    gl_Position = projection * modelview * vec4(aPos, 1.0);\n"
-        "    vColor = aColor;\n"
-        "}\n";
-    const char* fragSrc =
-        "#version 330 core\n"
-        "in vec3 vColor;\n"
-        "out vec4 fragColor;\n"
-        "void main() {\n"
-        "    fragColor = vec4(vColor, 1.0);\n"
-        "}\n";
-    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vs, 1, &vertSrc, NULL);
-    glCompileShader(vs);
-    GLint compiled;
-    glGetShaderiv(vs, GL_COMPILE_STATUS, &compiled);
-    if (!compiled) { char log[512]; glGetShaderInfoLog(vs, 512, NULL, log); std::cerr << "Actor VS error: " << log << std::endl; return 0; }
-    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fs, 1, &fragSrc, NULL);
-    glCompileShader(fs);
-    glGetShaderiv(fs, GL_COMPILE_STATUS, &compiled);
-    if (!compiled) { char log[512]; glGetShaderInfoLog(fs, 512, NULL, log); std::cerr << "Actor FS error: " << log << std::endl; return 0; }
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    glDeleteShader(vs); glDeleteShader(fs);
-    return prog;
-}
-
-// 定义路径点（世界坐标，y 固定在地面以上0.1米）
-void initPath() {
-    path.clear();
-    // 房间1起点
-    path.push_back(glm::vec3(-12.0f, 0.1f, 0.0f));
-    // 穿过走廊
-    path.push_back(glm::vec3(-1.5f, 0.1f, 0.0f));
-    path.push_back(glm::vec3(1.5f, 0.1f, 0.0f));
-    // 进入房间2
-    path.push_back(glm::vec3(12.0f, 0.1f, 0.0f));
-    // 返回
-    path.push_back(glm::vec3(1.5f, 0.1f, 0.0f));
-    path.push_back(glm::vec3(-1.5f, 0.1f, 0.0f));
-    path.push_back(glm::vec3(-12.0f, 0.1f, 0.0f));
-
-    actor.position = path[0];
-    currentPathIndex = 0;
-    pathT = 0.0f;
-}
-
-// 更新演员位置（基于时间差）
-void updateActor(float deltaTime) {
-    if (path.empty()) return;
-    float step = actorSpeed * deltaTime;
-    while (step > 0.0f && currentPathIndex < (int)path.size() - 1) {
-        glm::vec3 p0 = path[currentPathIndex];
-        glm::vec3 p1 = path[currentPathIndex + 1];
-        float segLen = glm::length(p1 - p0);
-        float remain = segLen - pathT * segLen;
-        if (step >= remain) {
-            step -= remain;
-            pathT = 1.0f;
-            currentPathIndex++;
-            if (currentPathIndex >= (int)path.size() - 1) {
-                currentPathIndex = 0;
-                pathT = 0.0f;
-                break;
-            }
-        }
-        else {
-            pathT += step / segLen;
-            step = 0.0f;
+    // Bump mapping (#8): procedural normal perturbation on walls
+    if(abs(n.y) < 0.3){
+        vec3 dp1 = dFdx(fPos);
+        vec3 dp2 = dFdy(fPos);
+        vec2 duv1 = dFdx(fUV);
+        vec2 duv2 = dFdy(fUV);
+        float det = duv1.x*duv2.y - duv2.x*duv1.y;
+        if(abs(det) > 0.0001){
+            float s = 1.0/det;
+            vec3 T = normalize(s*(duv2.y*dp1 - duv1.y*dp2));
+            vec3 B = normalize(s*(-duv2.x*dp1 + duv1.x*dp2));
+            float dhdu = cos(fUV.x*28.0)*sin(fUV.y*28.0)*28.0;
+            float dhdv = sin(fUV.x*28.0)*cos(fUV.y*28.0)*28.0;
+            n = normalize(n + 0.035*(dhdu*T + dhdv*B));
         }
     }
-    if (currentPathIndex < (int)path.size() - 1) {
-        glm::vec3 p0 = path[currentPathIndex];
-        glm::vec3 p1 = path[currentPathIndex + 1];
-        actor.position = p0 + pathT * (p1 - p0);
+
+    // Dynamic light intensity: warm lights pulse (#1 extension)
+    vec3 lc0 = lightColor[0]*(0.90+0.10*sin(sceneTime*1.8));
+    vec3 lc1 = lightColor[1];
+    vec3 lc2 = lightColor[2]*(0.90+0.10*sin(sceneTime*2.1+1.0));
+
+    vec3 result = vec3(0);
+    for(int i=0;i<3;i++){
+        vec3 lc = (i==0)?lc0:(i==1)?lc1:lc2;
+        vec3 ld = normalize(lightPos[i]-fPos);
+        float d  = length(lightPos[i]-fPos);
+        float att= 1.0/(1.0+0.07*d+0.017*d*d);
+        vec3 amb = 0.12*lc*tc;
+        float df = max(dot(n,ld),0.0);
+        vec3 dif = df*lc*tc;
+        vec3 vd  = normalize(viewPos-fPos);
+        vec3 hd  = normalize(ld+vd);
+        float sp = pow(max(dot(n,hd),0.0),64.0);
+        vec3 spec= sp*lc*0.35;
+        float sh = (i==0 && useShadow) ? shadowFactor(fPosLS,n,ld)*0.7 : 0.0;
+        result  += amb + att*(1.0-sh)*(dif+spec);
     }
-    else {
-        actor.position = path.back();
+    fragColor = vec4(result,1);
+}
+)";
+
+// ---- Actor/ball shader (Phong + vertex color) ----
+static const char* actorVS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec3 aColor;
+out vec3 fPos; out vec3 fNorm; out vec3 fCol;
+uniform mat4 proj, view, model;
+void main(){
+    vec4 wp = model * vec4(aPos,1);
+    fPos = wp.xyz;
+    fNorm= normalize(mat3(transpose(inverse(model)))*aNormal);
+    fCol = aColor;
+    gl_Position = proj*view*wp;
+}
+)";
+
+static const char* actorFS = R"(
+#version 330 core
+in vec3 fPos; in vec3 fNorm; in vec3 fCol;
+out vec4 fragColor;
+uniform vec3 lightPos[3]; uniform vec3 lightColor[3]; uniform vec3 viewPos;
+void main(){
+    vec3 n=normalize(fNorm); vec3 res=vec3(0);
+    for(int i=0;i<3;i++){
+        vec3 ld=normalize(lightPos[i]-fPos);
+        float d=length(lightPos[i]-fPos);
+        float att=1.0/(1.0+0.07*d+0.017*d*d);
+        vec3 amb=0.15*lightColor[i]*fCol;
+        float df=max(dot(n,ld),0.0);
+        vec3 dif=df*lightColor[i]*fCol;
+        vec3 vd=normalize(viewPos-fPos);
+        vec3 hd=normalize(ld+vd);
+        float sp=pow(max(dot(n,hd),0.0),32.0);
+        vec3 spec=sp*lightColor[i]*0.5;
+        res+=amb+att*(dif+spec);
     }
+    fragColor=vec4(res,1);
+}
+)";
+
+// ---- Emissive shader (light orbs) ----
+static const char* emitVS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+uniform mat4 proj, view, model;
+void main(){ gl_Position=proj*view*model*vec4(aPos,1); }
+)";
+static const char* emitFS = R"(
+#version 330 core
+out vec4 fragColor;
+uniform vec3 emitColor;
+void main(){ fragColor=vec4(emitColor,1); }
+)";
+
+// ---- Shadow pass shader ----
+static const char* shadowVS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+uniform mat4 lightSpaceMat, model;
+void main(){ gl_Position=lightSpaceMat*model*vec4(aPos,1); }
+)";
+static const char* shadowFS = R"(
+#version 330 core
+void main(){}
+)";
+
+// ---- Particle shader ----
+static const char* partVS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in float aSize;
+layout(location=2) in vec4 aColor;
+out vec4 pColor;
+uniform mat4 proj, view;
+void main(){
+    gl_Position = proj*view*vec4(aPos,1);
+    gl_PointSize = aSize;
+    pColor = aColor;
+}
+)";
+static const char* partFS = R"(
+#version 330 core
+in vec4 pColor;
+out vec4 fragColor;
+void main(){
+    vec2 c = gl_PointCoord - 0.5;
+    float r = length(c);
+    if(r > 0.5) discard;
+    float a = pColor.a * (1.0 - r*2.0);
+    fragColor = vec4(pColor.rgb, a);
+}
+)";
+
+// ---- Transparent glass shader (shares roomVS) ----
+static const char* glassFS = R"(
+#version 330 core
+in vec3 fPos; in vec3 fNorm; in vec2 fUV; in vec4 fPosLS;
+out vec4 fragColor;
+uniform vec3 lightPos[3]; uniform vec3 lightColor[3]; uniform vec3 viewPos;
+uniform float alpha;
+void main(){
+    vec3 n=normalize(fNorm); vec3 res=vec3(0);
+    for(int i=0;i<3;i++){
+        vec3 ld=normalize(lightPos[i]-fPos);
+        float d=length(lightPos[i]-fPos);
+        float att=1.0/(1.0+0.07*d+0.017*d*d);
+        vec3 vd=normalize(viewPos-fPos);
+        vec3 hd=normalize(ld+vd);
+        float sp=pow(max(dot(n,hd),0.0),128.0);
+        res+=att*(0.05*lightColor[i]+sp*lightColor[i]*0.8);
+    }
+    vec3 glassCol=vec3(0.55,0.75,0.95);
+    fragColor=vec4(glassCol+res, alpha);
+}
+)";
+
+// ---------------------------------------------------------------------------
+// Shader compile helpers
+// ---------------------------------------------------------------------------
+static GLuint compileShader(GLenum type, const char* src){
+    GLuint s = glCreateShader(type);
+    glShaderSource(s,1,&src,nullptr);
+    glCompileShader(s);
+    GLint ok; glGetShaderiv(s,GL_COMPILE_STATUS,&ok);
+    if(!ok){ char log[512]; glGetShaderInfoLog(s,512,nullptr,log); std::cerr<<log<<"\n"; }
+    return s;
+}
+static GLuint linkProg(const char* vs, const char* fs){
+    GLuint v=compileShader(GL_VERTEX_SHADER,vs);
+    GLuint f=compileShader(GL_FRAGMENT_SHADER,fs);
+    GLuint p=glCreateProgram();
+    glAttachShader(p,v); glAttachShader(p,f); glLinkProgram(p);
+    GLint ok; glGetProgramiv(p,GL_LINK_STATUS,&ok);
+    if(!ok){ char log[512]; glGetProgramInfoLog(p,512,nullptr,log); std::cerr<<log<<"\n"; }
+    glDeleteShader(v); glDeleteShader(f);
+    return p;
 }
 
-// ========== PPM 纹理加载 ==========
-unsigned char* loadPPM(const char* filename, int& width, int& height) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) return nullptr;
-    char buf[1024];
-    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return nullptr; }
-    if (buf[0] != 'P' || buf[1] != '6') { fclose(f); return nullptr; }
-    do { if (!fgets(buf, sizeof(buf), f)) { fclose(f); return nullptr; } } while (buf[0] == '#');
-    sscanf(buf, "%d %d", &width, &height);
-    do { if (!fgets(buf, sizeof(buf), f)) { fclose(f); return nullptr; } } while (buf[0] == '#');
-    int maxval;
-    sscanf(buf, "%d", &maxval);
-    unsigned char* data = new unsigned char[width * height * 3];
-    fread(data, 1, width * height * 3, f);
-    fclose(f);
-    return data;
+// ---------------------------------------------------------------------------
+// Programs
+// ---------------------------------------------------------------------------
+GLuint progRoom, progActor, progEmit, progShadow, progParticle, progGlass;
+
+// ---------------------------------------------------------------------------
+// Lights  (3 point lights)
+// ---------------------------------------------------------------------------
+glm::vec3 lightPos[3] = {
+    {-9.0f,7.4f, 0.0f},
+    { 0.0f,7.4f, 0.0f},
+    { 9.0f,7.4f, 0.0f}
+};
+glm::vec3 lightColor[3] = {
+    {1.0f,0.95f,0.80f},
+    {1.0f,1.00f,1.00f},
+    {1.0f,0.95f,0.80f}
+};
+
+// ---------------------------------------------------------------------------
+// Geometry helpers
+// ---------------------------------------------------------------------------
+static void addRect(std::vector<Vertex>& v,
+    float xa,float ya,float za, float xb,float yb,float zb,
+    float xc,float yc,float zc, float xd,float yd,float zd,
+    float nx,float ny,float nz,
+    float u1,float v1,float u2,float v2)
+{
+    v.push_back({xa,ya,za,nx,ny,nz,u1,v1});
+    v.push_back({xb,yb,zb,nx,ny,nz,u2,v1});
+    v.push_back({xc,yc,zc,nx,ny,nz,u2,v2});
+    v.push_back({xa,ya,za,nx,ny,nz,u1,v1});
+    v.push_back({xc,yc,zc,nx,ny,nz,u2,v2});
+    v.push_back({xd,yd,zd,nx,ny,nz,u1,v2});
 }
 
-GLuint loadTexturePPM(const char* filename) {
-    int width, height;
-    unsigned char* image = loadPPM(filename, width, height);
-    if (!image) {
-        std::cerr << "Failed to load PPM texture: " << filename << std::endl;
-        return 0;
-    }
-    GLuint tex;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image);
-    delete[] image;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    return tex;
+static void addBox(std::vector<Vertex>& v,
+    float cx,float cy,float cz, float sx,float sy,float sz,
+    float ru,float rv)
+{
+    float x1=cx-sx/2,x2=cx+sx/2;
+    float y1=cy-sy/2,y2=cy+sy/2;
+    float z1=cz-sz/2,z2=cz+sz/2;
+    addRect(v, x1,y1,z2, x1,y1,z1, x1,y2,z1, x1,y2,z2, -1,0,0, 0,0,ru,rv);
+    addRect(v, x2,y1,z1, x2,y1,z2, x2,y2,z2, x2,y2,z1, +1,0,0, 0,0,ru,rv);
+    addRect(v, x2,y1,z1, x1,y1,z1, x1,y2,z1, x2,y2,z1,  0,0,-1, 0,0,ru,rv);
+    addRect(v, x1,y1,z2, x2,y1,z2, x2,y2,z2, x1,y2,z2,  0,0,+1, 0,0,ru,rv);
+    addRect(v, x1,y1,z1, x2,y1,z1, x2,y1,z2, x1,y1,z2,  0,-1,0, 0,0,ru,rv);
+    addRect(v, x1,y2,z2, x2,y2,z2, x2,y2,z1, x1,y2,z1,  0,+1,0, 0,0,ru,rv);
 }
 
-// 矩形面
-void addRect(std::vector<Vertex>& verts,
-    float x1, float y1, float z1,
-    float x2, float y2, float z2,
-    bool isXAligned, bool isZAligned,
-    float u1, float v1, float u2, float v2) {
-    float xa, ya, za, xb, yb, zb, xc, yc, zc, xd, yd, zd;
-    if (isZAligned) {
-        xa = x1; ya = y1; za = z1;
-        xb = x2; yb = y1; zb = z1;
-        xc = x2; yc = y2; zc = z2;
-        xd = x1; yd = y2; zd = z2;
-    }
-    else if (isXAligned) {
-        xa = x1; ya = y1; za = z1;
-        xb = x1; yb = y1; zb = z2;
-        xc = x1; yc = y2; zc = z2;
-        xd = x1; yd = y2; zd = z1;
-    }
-    else {
-        xa = x1; ya = y1; za = z1;
-        xb = x2; yb = y1; zb = z1;
-        xc = x2; yc = y2; zc = z2;
-        xd = x1; yd = y2; zd = z2;
-    }
-    verts.push_back({ xa, ya, za, u1, v1 });
-    verts.push_back({ xb, yb, zb, u2, v1 });
-    verts.push_back({ xc, yc, zc, u2, v2 });
-    verts.push_back({ xa, ya, za, u1, v1 });
-    verts.push_back({ xc, yc, zc, u2, v2 });
-    verts.push_back({ xd, yd, zd, u1, v2 });
-}
+// ---------------------------------------------------------------------------
+// Scene geometry
+// ---------------------------------------------------------------------------
+std::vector<Vertex> floorVerts, ceilingVerts, wallVerts, glassVerts;
+GLuint floorVAO,ceilingVAO,wallVAO,glassVAO;
+int    floorN,ceilingN,wallN,glassN;
 
-void addBox(std::vector<Vertex>& verts,
-    float cx, float cy, float cz,
-    float sx, float sy, float sz,
-    float repeatU, float repeatV) {
-    float x1 = cx - sx / 2, x2 = cx + sx / 2;
-    float y1 = cy - sy / 2, y2 = cy + sy / 2;
-    float z1 = cz - sz / 2, z2 = cz + sz / 2;
-    addRect(verts, x1, y1, z1, x1, y2, z2, true, false, 0, 0, repeatU, repeatV);
-    addRect(verts, x2, y1, z1, x2, y2, z2, true, false, 0, 0, repeatU, repeatV);
-    addRect(verts, x1, y1, z1, x2, y2, z1, false, true, 0, 0, repeatU, repeatV);
-    addRect(verts, x1, y1, z2, x2, y2, z2, false, true, 0, 0, repeatU, repeatV);
-    addRect(verts, x1, y1, z1, x2, y1, z2, false, false, 0, 0, repeatU, repeatV);
-    addRect(verts, x1, y2, z1, x2, y2, z2, false, false, 0, 0, repeatU, repeatV);
-}
-
-// 构建场景（墙体）
-void buildScene() {
-    floorVerts.clear();
-    ceilingVerts.clear();
-    wallVerts.clear();
-
-    float roomW = 16.0f, roomD = 16.0f, roomH = 8.0f;
-    float corridorW = 4.0f;
-    float wallThick = 0.4f;
-    float roomCX1 = -9.0f, roomCX2 = 9.0f;
-    float roomCZ = 0.0f;
-    float r1_xL = roomCX1 - roomW / 2, r1_xR = roomCX1 + roomW / 2;
-    float r2_xL = roomCX2 - roomW / 2, r2_xR = roomCX2 + roomW / 2;
-    float zL = roomCZ - roomD / 2, zR = roomCZ + roomD / 2;
-    float yBottom = 0.0f, yTop = roomH;
-    float corZ1 = -corridorW / 2, corZ2 = corridorW / 2;
-
-    auto addFloorCeil = [&](float x1, float z1, float x2, float z2, float y, bool isFloor) {
-        std::vector<Vertex>& target = isFloor ? floorVerts : ceilingVerts;
-        addRect(target, x1, y, z1, x2, y, z2, false, false, 0, 0, 8, 8);
-        };
-    addFloorCeil(r1_xL, zL, r1_xR, zR, yBottom, true);
-    addFloorCeil(r1_xL, zL, r1_xR, zR, yTop, false);
-    addFloorCeil(r2_xL, zL, r2_xR, zR, yBottom, true);
-    addFloorCeil(r2_xL, zL, r2_xR, zR, yTop, false);
-    addFloorCeil(r1_xR, corZ1, r2_xL, corZ2, yBottom, true);
-
-    auto addWallBlock = [&](float cx, float cy, float cz, float lenX, float lenY, float lenZ, float repU, float repV) {
-        addBox(wallVerts, cx, cy, cz, lenX, lenY, lenZ, repU, repV);
-        };
-
-    // 房间1 后墙
-    addWallBlock((r1_xL + r1_xR) / 2, (yBottom + yTop) / 2, zL - wallThick / 2, r1_xR - r1_xL, yTop - yBottom, wallThick, 1, 1);
-    // 前墙
-    addWallBlock((r1_xL + r1_xR) / 2, (yBottom + yTop) / 2, zR + wallThick / 2, r1_xR - r1_xL, yTop - yBottom, wallThick, 1, 1);
-    // 左墙
-    addWallBlock(r1_xL - wallThick / 2, (yBottom + yTop) / 2, (zL + zR) / 2, wallThick, yTop - yBottom, zR - zL, 1, 1);
-    // 右墙分段
-    if (corZ1 > zL) addWallBlock(r1_xR + wallThick / 2, (yBottom + yTop) / 2, (zL + corZ1) / 2, wallThick, yTop - yBottom, corZ1 - zL, 1, 1);
-    if (corZ2 < zR) addWallBlock(r1_xR + wallThick / 2, (yBottom + yTop) / 2, (corZ2 + zR) / 2, wallThick, yTop - yBottom, zR - corZ2, 1, 1);
-    // 房间2
-    addWallBlock((r2_xL + r2_xR) / 2, (yBottom + yTop) / 2, zL - wallThick / 2, r2_xR - r2_xL, yTop - yBottom, wallThick, 1, 1);
-    addWallBlock((r2_xL + r2_xR) / 2, (yBottom + yTop) / 2, zR + wallThick / 2, r2_xR - r2_xL, yTop - yBottom, wallThick, 1, 1);
-    addWallBlock(r2_xR + wallThick / 2, (yBottom + yTop) / 2, (zL + zR) / 2, wallThick, yTop - yBottom, zR - zL, 1, 1);
-    if (corZ1 > zL) addWallBlock(r2_xL - wallThick / 2, (yBottom + yTop) / 2, (zL + corZ1) / 2, wallThick, yTop - yBottom, corZ1 - zL, 1, 1);
-    if (corZ2 < zR) addWallBlock(r2_xL - wallThick / 2, (yBottom + yTop) / 2, (corZ2 + zR) / 2, wallThick, yTop - yBottom, zR - corZ2, 1, 1);
-    // 走廊墙壁
-    addWallBlock((r1_xR + r2_xL) / 2, (yBottom + yTop) / 2, corZ1 - wallThick / 2, r2_xL - r1_xR, yTop - yBottom, wallThick, 1, 1);
-    addWallBlock((r1_xR + r2_xL) / 2, (yBottom + yTop) / 2, corZ2 + wallThick / 2, r2_xL - r1_xR, yTop - yBottom, wallThick, 1, 1);
-}
-
-// 创建 VAO
-GLuint createVAO(const std::vector<Vertex>& verts) {
-    if (verts.empty()) return 0;
-    GLuint vao, vbo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
+static GLuint makeVAO(const std::vector<Vertex>& verts){
+    if(verts.empty()) return 0;
+    GLuint vao,vbo;
+    glGenVertexArrays(1,&vao); glGenBuffers(1,&vbo);
     glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(Vertex), verts.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3 * sizeof(float)));
+    glBindBuffer(GL_ARRAY_BUFFER,vbo);
+    glBufferData(GL_ARRAY_BUFFER,verts.size()*sizeof(Vertex),verts.data(),GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)(3*4));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)(6*4));
     glBindVertexArray(0);
     return vao;
 }
 
-// 房间着色器
-GLuint createShaderProgram() {
-    const char* vertSrc =
-        "#version 330 core\n"
-        "layout(location=0) in vec3 aPos;\n"
-        "layout(location=1) in vec2 aTexCoord;\n"
-        "out vec2 vTexCoord;\n"
-        "uniform mat4 projection;\n"
-        "uniform mat4 modelview;\n"
-        "void main() {\n"
-        "    gl_Position = projection * modelview * vec4(aPos, 1.0);\n"
-        "    vTexCoord = aTexCoord;\n"
-        "}\n";
-    const char* fragSrc =
-        "#version 330 core\n"
-        "in vec2 vTexCoord;\n"
-        "out vec4 fragColor;\n"
-        "uniform sampler2D tex;\n"
-        "void main() {\n"
-        "    fragColor = texture(tex, vTexCoord);\n"
-        "}\n";
-    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vs, 1, &vertSrc, NULL);
-    glCompileShader(vs);
-    GLint compiled;
-    glGetShaderiv(vs, GL_COMPILE_STATUS, &compiled);
-    if (!compiled) { char log[512]; glGetShaderInfoLog(vs, 512, NULL, log); std::cerr << "VS error: " << log << std::endl; return 0; }
-    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fs, 1, &fragSrc, NULL);
-    glCompileShader(fs);
-    glGetShaderiv(fs, GL_COMPILE_STATUS, &compiled);
-    if (!compiled) { char log[512]; glGetShaderInfoLog(fs, 512, NULL, log); std::cerr << "FS error: " << log << std::endl; return 0; }
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    GLint linked;
-    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
-    if (!linked) { char log[512]; glGetProgramInfoLog(prog, 512, NULL, log); std::cerr << "Link error: " << log << std::endl; return 0; }
-    glDeleteShader(vs); glDeleteShader(fs);
-    return prog;
-}
+static void buildScene(){
+    floorVerts.clear(); ceilingVerts.clear(); wallVerts.clear(); glassVerts.clear();
 
-// 更新相机并保存当前视图矩阵
-void updateCamera() {
-    glm::vec3 front;
-    front.x = cos(glm::radians(cameraYaw)) * cos(glm::radians(cameraPitch));
-    front.y = sin(glm::radians(cameraPitch));
-    front.z = sin(glm::radians(cameraYaw)) * cos(glm::radians(cameraPitch));
-    front = glm::normalize(front);
-    glm::vec3 right = glm::normalize(glm::cross(front, glm::vec3(0, 1, 0)));
-    glm::vec3 up = glm::cross(right, front);
-    currentView = glm::lookAt(cameraPos, cameraPos + front, up);
-    glUniformMatrix4fv(modelviewLoc, 1, GL_FALSE, glm::value_ptr(currentView));
-}
+    const float roomW=16,roomD=16,roomH=8,corridorW=4,wallT=0.4f;
+    const float cx1=-9,cx2=9,cz=0;
+    float r1L=cx1-roomW/2, r1R=cx1+roomW/2;
+    float r2L=cx2-roomW/2, r2R=cx2+roomW/2;
+    float zL=cz-roomD/2,   zR=cz+roomD/2;
+    float corZ1=-corridorW/2, corZ2=corridorW/2;
+    float yB=0,yT=roomH;
 
-void processMovement() {
-    int now = glutGet(GLUT_ELAPSED_TIME);
-    float delta = (now - lastTime) * 0.001f;
-    lastTime = now;
-    if (delta > 0.05f) delta = 0.05f;
-    float speed = moveSpeed * delta;
-    glm::vec3 front;
-    front.x = cos(glm::radians(cameraYaw)) * cos(glm::radians(cameraPitch));
-    front.y = sin(glm::radians(cameraPitch));
-    front.z = sin(glm::radians(cameraYaw)) * cos(glm::radians(cameraPitch));
-    front = glm::normalize(front);
-    glm::vec3 right = glm::normalize(glm::cross(front, glm::vec3(0, 1, 0)));
-    float dx = 0, dz = 0, dy = 0;
-    if (keys['w']) { dx += front.x * speed; dz += front.z * speed; }
-    if (keys['s']) { dx -= front.x * speed; dz -= front.z * speed; }
-    if (keys['a']) { dx -= right.x * speed; dz -= right.z * speed; }
-    if (keys['d']) { dx += right.x * speed; dz += right.z * speed; }
-    if (keys['q']) dy += speed;
-    if (keys['e']) dy -= speed;
-    if (dx != 0 || dz != 0 || dy != 0) {
-        cameraPos += glm::vec3(dx, dy, dz);
-        glutPostRedisplay();
+    auto addFloor=[&](float x1,float z1,float x2,float z2,float y,bool fl){
+        auto& t=fl?floorVerts:ceilingVerts;
+        float ny=fl?1.0f:-1.0f;
+        addRect(t, x1,y,z1, x2,y,z1, x2,y,z2, x1,y,z2, 0,ny,0, 0,0,8,8);
+    };
+    // Room 1 floor/ceiling
+    addFloor(r1L,zL,r1R,zR,yB,true);  addFloor(r1L,zL,r1R,zR,yT,false);
+    // Room 2
+    addFloor(r2L,zL,r2R,zR,yB,true);  addFloor(r2L,zL,r2R,zR,yT,false);
+    // Corridor floor
+    addFloor(r1R,corZ1,r2L,corZ2,yB,true);
+    // Corridor ceiling
+    addFloor(r1R,corZ1,r2L,corZ2,yT,false);
+
+    auto wb=[&](float cx,float cy,float cz2,float lx,float ly,float lz){
+        addBox(wallVerts,cx,cy,cz2,lx,ly,lz,1,1);
+    };
+    float midY=(yB+yT)/2, hY=yT-yB;
+    // Room 1
+    wb((r1L+r1R)/2, midY, zL-wallT/2,   r1R-r1L, hY, wallT);
+    wb((r1L+r1R)/2, midY, zR+wallT/2,   r1R-r1L, hY, wallT);
+    wb(r1L-wallT/2, midY, (zL+zR)/2,    wallT,   hY, zR-zL);
+    if(corZ1>zL) wb(r1R+wallT/2, midY, (zL+corZ1)/2, wallT, hY, corZ1-zL);
+    if(corZ2<zR) wb(r1R+wallT/2, midY, (corZ2+zR)/2, wallT, hY, zR-corZ2);
+    // Room 2
+    wb((r2L+r2R)/2, midY, zL-wallT/2,   r2R-r2L, hY, wallT);
+    wb((r2L+r2R)/2, midY, zR+wallT/2,   r2R-r2L, hY, wallT);
+    wb(r2R+wallT/2, midY, (zL+zR)/2,    wallT,   hY, zR-zL);
+    if(corZ1>zL) wb(r2L-wallT/2, midY, (zL+corZ1)/2, wallT, hY, corZ1-zL);
+    if(corZ2<zR) wb(r2L-wallT/2, midY, (corZ2+zR)/2, wallT, hY, zR-corZ2);
+    // Corridor walls
+    wb((r1R+r2L)/2, midY, corZ1-wallT/2, r2L-r1R, hY, wallT);
+    wb((r1R+r2L)/2, midY, corZ2+wallT/2, r2L-r1R, hY, wallT);
+
+    // Furniture: 2 tables + 2 chairs (one set per room, use wallVerts/wallTex)
+    auto table=[&](float cx,float cz){
+        addBox(wallVerts, cx, 0.85f, cz, 2.0f, 0.08f, 1.0f, 2,1); // top
+        for(float dx:{-0.85f,0.85f}) for(float dz2:{-0.42f,0.42f})
+            addBox(wallVerts, cx+dx, 0.4f, cz+dz2, 0.1f,0.8f,0.1f, 1,1);
+    };
+    auto chair=[&](float cx,float cz){
+        addBox(wallVerts, cx, 0.48f, cz,      0.55f,0.05f,0.55f, 1,1); // seat
+        addBox(wallVerts, cx, 0.84f, cz+0.25f,0.55f,0.72f,0.05f, 1,1); // back
+        for(float dx:{-0.22f,0.22f}) for(float dz2:{-0.22f,0.22f})
+            addBox(wallVerts, cx+dx, 0.22f, cz+dz2, 0.06f,0.45f,0.06f, 1,1);
+    };
+    table(-9.0f, -4.5f);  chair(-9.0f, -6.5f);   // room 1
+    table( 9.0f,  4.5f);  chair( 9.0f,  6.5f);   // room 2
+
+    // Glass panels in corridor (two thin panes, both faces)
+    for(float gx : {-0.3f, 0.3f}){
+        // front face (normal +X)
+        addRect(glassVerts, gx,0,corZ1, gx,0,corZ2, gx,yT,corZ2, gx,yT,corZ1, 1,0,0, 0,0,1,2);
+        // back face (normal -X)
+        addRect(glassVerts, gx,0,corZ2, gx,0,corZ1, gx,yT,corZ1, gx,yT,corZ2, -1,0,0, 0,0,1,2);
     }
+
+    floorVAO   = makeVAO(floorVerts);   floorN   = (int)floorVerts.size();
+    ceilingVAO = makeVAO(ceilingVerts); ceilingN = (int)ceilingVerts.size();
+    wallVAO    = makeVAO(wallVerts);    wallN    = (int)wallVerts.size();
+    glassVAO   = makeVAO(glassVerts);   glassN   = (int)glassVerts.size();
 }
 
-GLuint floorVAO, ceilingVAO, wallVAO;
-int floorVertCount, ceilingVertCount, wallVertCount;
-int lastActorUpdate = 0;
+// ---------------------------------------------------------------------------
+// PPM texture loading
+// ---------------------------------------------------------------------------
+static unsigned char* loadPPM(const char* fn, int& w, int& h){
+    FILE* f=fopen(fn,"rb"); if(!f) return nullptr;
+    char buf[256];
+    if(!fgets(buf,256,f)){fclose(f);return nullptr;}
+    if(buf[0]!='P'||buf[1]!='6'){fclose(f);return nullptr;}
+    do{ if(!fgets(buf,256,f)){fclose(f);return nullptr;} } while(buf[0]=='#');
+    sscanf(buf,"%d %d",&w,&h);
+    do{ if(!fgets(buf,256,f)){fclose(f);return nullptr;} } while(buf[0]=='#');
+    unsigned char* d=new unsigned char[w*h*3];
+    fread(d,1,w*h*3,f); fclose(f);
+    return d;
+}
+static GLuint loadTex(const char* fn){
+    int w,h; unsigned char* img=loadPPM(fn,w,h);
+    if(!img){ std::cerr<<"Cannot load "<<fn<<"\n"; return 0; }
+    GLuint t; glGenTextures(1,&t); glBindTexture(GL_TEXTURE_2D,t);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGB,w,h,0,GL_RGB,GL_UNSIGNED_BYTE,img);
+    delete[] img;
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    return t;
+}
+GLuint floorTex,wallTex,ceilingTex;
 
-void display() {
-    // 更新演员位置
-    int nowTime = glutGet(GLUT_ELAPSED_TIME);
-    float delta = (nowTime - lastActorUpdate) * 0.001f;
-    lastActorUpdate = nowTime;
-    if (delta > 0.05f) delta = 0.05f;
-    updateActor(delta);
+// ---------------------------------------------------------------------------
+// Actor
+// ---------------------------------------------------------------------------
+std::vector<ColorVertex> actorVerts;
+GLuint actorVAO,actorVBO; int actorN;
 
-    processMovement();
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+struct Actor { glm::vec3 pos; };
+Actor actor;
+std::vector<glm::vec3> path;
+int   pathIdx=0; float pathT=0;
+float actorSpeed=0.8f;
 
-    // 绘制房间
-    glUseProgram(shaderProgram);
-    glm::mat4 proj = glm::perspective(glm::radians(60.0f), (float)windowWidth / windowHeight, 0.1f, 100.0f);
-    glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(proj));
-    updateCamera();  // 设置房间的 modelview 并存储 currentView
-    glActiveTexture(GL_TEXTURE0);
-    glUniform1i(texLoc, 0);
+static void addCube(const glm::vec3& c,const glm::vec3& s,const glm::vec3& col){
+    float x1=c.x-s.x/2,x2=c.x+s.x/2;
+    float y1=c.y-s.y/2,y2=c.y+s.y/2;
+    float z1=c.z-s.z/2,z2=c.z+s.z/2;
+    auto q=[&](float xa,float ya,float za,float xb,float yb,float zb,
+               float xc,float yc,float zc,float xd,float yd,float zd,
+               float nx,float ny,float nz){
+        actorVerts.push_back({xa,ya,za,nx,ny,nz,col.r,col.g,col.b});
+        actorVerts.push_back({xb,yb,zb,nx,ny,nz,col.r,col.g,col.b});
+        actorVerts.push_back({xc,yc,zc,nx,ny,nz,col.r,col.g,col.b});
+        actorVerts.push_back({xa,ya,za,nx,ny,nz,col.r,col.g,col.b});
+        actorVerts.push_back({xc,yc,zc,nx,ny,nz,col.r,col.g,col.b});
+        actorVerts.push_back({xd,yd,zd,nx,ny,nz,col.r,col.g,col.b});
+    };
+    q(x1,y1,z2,x2,y1,z2,x2,y2,z2,x1,y2,z2, 0,0,+1);
+    q(x2,y1,z1,x1,y1,z1,x1,y2,z1,x2,y2,z1, 0,0,-1);
+    q(x1,y1,z1,x1,y1,z2,x1,y2,z2,x1,y2,z1,-1,0, 0);
+    q(x2,y1,z2,x2,y1,z1,x2,y2,z1,x2,y2,z2,+1,0, 0);
+    q(x1,y1,z1,x2,y1,z1,x2,y1,z2,x1,y1,z2, 0,-1,0);
+    q(x1,y2,z2,x2,y2,z2,x2,y2,z1,x1,y2,z1, 0,+1,0);
+}
 
-    glBindTexture(GL_TEXTURE_2D, floorTex);
-    glBindVertexArray(floorVAO);
-    glDrawArrays(GL_TRIANGLES, 0, floorVertCount);
-
-    glBindTexture(GL_TEXTURE_2D, wallTex);
-    glBindVertexArray(wallVAO);
-    glDrawArrays(GL_TRIANGLES, 0, wallVertCount);
-
-    glBindTexture(GL_TEXTURE_2D, ceilingTex);
-    glBindVertexArray(ceilingVAO);
-    glDrawArrays(GL_TRIANGLES, 0, ceilingVertCount);
-
-    // 绘制演员
-    glUseProgram(actorShader);
-    glUniformMatrix4fv(actorProjectionLoc, 1, GL_FALSE, glm::value_ptr(proj));
-    glm::mat4 actorModel = glm::translate(glm::mat4(1.0f), actor.position);
-    glm::mat4 actorMV = currentView * actorModel;
-    glUniformMatrix4fv(actorModelviewLoc, 1, GL_FALSE, glm::value_ptr(actorMV));
+static void buildActor(){
+    actorVerts.clear();
+    addCube({0,0.6f,0},{0.6f,1.0f,0.4f},{0.6f,0.4f,0.2f});
+    addCube({0,1.2f,0},{0.5f,0.5f,0.4f},{0.9f,0.7f,0.4f});
+    addCube({-0.45f,0.9f,0},{0.3f,0.6f,0.3f},{0.2f,0.4f,0.8f});
+    addCube({ 0.45f,0.9f,0},{0.3f,0.6f,0.3f},{0.2f,0.4f,0.8f});
+    addCube({-0.2f,0.1f,0},{0.3f,0.5f,0.3f},{0.1f,0.2f,0.5f});
+    addCube({ 0.2f,0.1f,0},{0.3f,0.5f,0.3f},{0.1f,0.2f,0.5f});
+    actorN=(int)actorVerts.size();
+    glGenVertexArrays(1,&actorVAO); glGenBuffers(1,&actorVBO);
     glBindVertexArray(actorVAO);
-    glDrawArrays(GL_TRIANGLES, 0, actorVertexCount);
+    glBindBuffer(GL_ARRAY_BUFFER,actorVBO);
+    glBufferData(GL_ARRAY_BUFFER,actorVerts.size()*sizeof(ColorVertex),actorVerts.data(),GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(ColorVertex),(void*)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,sizeof(ColorVertex),(void*)(3*4));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2,3,GL_FLOAT,GL_FALSE,sizeof(ColorVertex),(void*)(6*4));
+    glBindVertexArray(0);
+}
+
+static void initPath(){
+    path={ {-12,0.1f,0},{-1.5f,0.1f,0},{1.5f,0.1f,0},{12,0.1f,0},
+           {1.5f,0.1f,0},{-1.5f,0.1f,0},{-12,0.1f,0} };
+    actor.pos=path[0]; pathIdx=0; pathT=0;
+}
+
+static void updateActor(float dt){
+    float step=actorSpeed*dt;
+    while(step>0&&pathIdx<(int)path.size()-1){
+        glm::vec3 p0=path[pathIdx],p1=path[pathIdx+1];
+        float seg=glm::length(p1-p0);
+        float rem=seg*(1-pathT);
+        if(step>=rem){ step-=rem; pathIdx++; pathT=0;
+            if(pathIdx>=(int)path.size()-1){pathIdx=0;pathT=0;break;}
+        } else { pathT+=step/seg; step=0; }
+    }
+    if(pathIdx<(int)path.size()-1)
+        actor.pos=path[pathIdx]+pathT*(path[pathIdx+1]-path[pathIdx]);
+    else actor.pos=path.back();
+}
+
+// ---------------------------------------------------------------------------
+// Bouncing ball  (effect #2)
+// ---------------------------------------------------------------------------
+std::vector<ColorVertex> ballVerts;
+GLuint ballVAO,ballVBO; int ballN;
+glm::vec3 ballPos(-9,1.0f,3);
+glm::vec3 ballVel(2.8f,4.2f,1.6f);
+const float ballR=0.5f;
+
+static void buildBall(){
+    ballVerts.clear();
+    const int lat=16,lon=16;
+    const float pi=(float)M_PI;
+    glm::vec3 col(1.0f,0.25f,0.05f);
+    for(int i=0;i<lat;i++){
+        float t1=pi*i/lat, t2=pi*(i+1)/lat;
+        for(int j=0;j<lon;j++){
+            float p1=2*pi*j/lon, p2=2*pi*(j+1)/lon;
+            glm::vec3 n[4]={
+                {sinf(t1)*cosf(p1),cosf(t1),sinf(t1)*sinf(p1)},
+                {sinf(t1)*cosf(p2),cosf(t1),sinf(t1)*sinf(p2)},
+                {sinf(t2)*cosf(p2),cosf(t2),sinf(t2)*sinf(p2)},
+                {sinf(t2)*cosf(p1),cosf(t2),sinf(t2)*sinf(p1)}
+            };
+            // tri 0,1,2
+            for(int k : {0,1,2,0,2,3})
+                ballVerts.push_back({n[k].x*ballR,n[k].y*ballR,n[k].z*ballR,
+                                     n[k].x,n[k].y,n[k].z, col.r,col.g,col.b});
+        }
+    }
+    ballN=(int)ballVerts.size();
+    glGenVertexArrays(1,&ballVAO); glGenBuffers(1,&ballVBO);
+    glBindVertexArray(ballVAO);
+    glBindBuffer(GL_ARRAY_BUFFER,ballVBO);
+    glBufferData(GL_ARRAY_BUFFER,ballVerts.size()*sizeof(ColorVertex),ballVerts.data(),GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(ColorVertex),(void*)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,sizeof(ColorVertex),(void*)(3*4));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2,3,GL_FLOAT,GL_FALSE,sizeof(ColorVertex),(void*)(6*4));
+    glBindVertexArray(0);
+}
+
+static void updateBall(float dt){
+    ballPos+=ballVel*dt;
+    if(ballPos.y<ballR){ballPos.y=ballR;ballVel.y=fabsf(ballVel.y);}
+    if(ballPos.y>8-ballR){ballPos.y=8-ballR;ballVel.y=-fabsf(ballVel.y);}
+    if(ballPos.x<-17+ballR){ballPos.x=-17+ballR;ballVel.x=fabsf(ballVel.x);}
+    if(ballPos.x>-1-ballR){ballPos.x=-1-ballR;ballVel.x=-fabsf(ballVel.x);}
+    if(ballPos.z<-8+ballR){ballPos.z=-8+ballR;ballVel.z=fabsf(ballVel.z);}
+    if(ballPos.z>8-ballR){ballPos.z=8-ballR;ballVel.z=-fabsf(ballVel.z);}
+}
+
+// ---------------------------------------------------------------------------
+// Light orbs  (effect #7) — small emissive spheres
+// ---------------------------------------------------------------------------
+std::vector<glm::vec3> orbVerts;
+GLuint orbVAO,orbVBO; int orbN;
+
+static void buildOrb(){
+    orbVerts.clear();
+    const int lat=8,lon=8;
+    const float pi=(float)M_PI, r=0.18f;
+    for(int i=0;i<lat;i++){
+        float t1=pi*i/lat,t2=pi*(i+1)/lat;
+        for(int j=0;j<lon;j++){
+            float p1=2*pi*j/lon,p2=2*pi*(j+1)/lon;
+            glm::vec3 n[4]={
+                {sinf(t1)*cosf(p1),cosf(t1),sinf(t1)*sinf(p1)},
+                {sinf(t1)*cosf(p2),cosf(t1),sinf(t1)*sinf(p2)},
+                {sinf(t2)*cosf(p2),cosf(t2),sinf(t2)*sinf(p2)},
+                {sinf(t2)*cosf(p1),cosf(t2),sinf(t2)*sinf(p1)}
+            };
+            for(int k : {0,1,2,0,2,3}) orbVerts.push_back(n[k]*r);
+        }
+    }
+    orbN=(int)orbVerts.size();
+    glGenVertexArrays(1,&orbVAO); glGenBuffers(1,&orbVBO);
+    glBindVertexArray(orbVAO);
+    glBindBuffer(GL_ARRAY_BUFFER,orbVBO);
+    glBufferData(GL_ARRAY_BUFFER,orbVerts.size()*sizeof(glm::vec3),orbVerts.data(),GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,nullptr);
+    glBindVertexArray(0);
+}
+
+// ---------------------------------------------------------------------------
+// Particles  (effect #3)
+// ---------------------------------------------------------------------------
+struct Particle{ glm::vec3 pos,vel; float life,maxLife,size; };
+std::vector<Particle> particles;
+GLuint partVAO,partVBO;
+glm::vec3 fireOrigin(9.0f,1.6f,-7.5f);
+
+static void spawnParticle(){
+    Particle p;
+    float rx=(rand()%100-50)/300.0f, rz=(rand()%100-50)/300.0f;
+    p.pos=fireOrigin+glm::vec3(rx,0,rz);
+    p.vel={( rand()%100-50)/80.0f, 1.4f+(rand()%100)/200.0f, (rand()%100-50)/80.0f};
+    p.maxLife=p.life=0.7f+(rand()%100)/200.0f;
+    p.size=14.0f+(rand()%8);
+    particles.push_back(p);
+}
+static void updateParticles(float dt){
+    for(int i=0;i<6;i++) spawnParticle();
+    for(auto& p:particles){
+        p.life-=dt; p.pos+=p.vel*dt;
+        p.vel.x*=0.97f; p.vel.z*=0.97f;
+        p.size=14.0f*(p.life/p.maxLife);
+    }
+    particles.erase(std::remove_if(particles.begin(),particles.end(),
+        [](const Particle& p){return p.life<=0;}),particles.end());
+    if(particles.size()>400) particles.erase(particles.begin(),particles.begin()+50);
+}
+static void initPartVAO(){
+    glGenVertexArrays(1,&partVAO); glGenBuffers(1,&partVBO);
+    glBindVertexArray(partVAO);
+    glBindBuffer(GL_ARRAY_BUFFER,partVBO);
+    glBufferData(GL_ARRAY_BUFFER,500*sizeof(ParticleVert),nullptr,GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1,1,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)(3*4));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(ParticleVert),(void*)(4*4));
+    glBindVertexArray(0);
+}
+
+// ---------------------------------------------------------------------------
+// Shadow map  (effect #6)
+// ---------------------------------------------------------------------------
+const int SM=2048;
+GLuint shadowFBO,shadowTex;
+glm::mat4 lightSpaceMat;
+
+static void initShadow(){
+    glGenFramebuffers(1,&shadowFBO);
+    glGenTextures(1,&shadowTex);
+    glBindTexture(GL_TEXTURE_2D,shadowTex);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT,SM,SM,0,GL_DEPTH_COMPONENT,GL_FLOAT,nullptr);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_BORDER);
+    float bc[]={1,1,1,1}; glTexParameterfv(GL_TEXTURE_2D,GL_TEXTURE_BORDER_COLOR,bc);
+    glBindFramebuffer(GL_FRAMEBUFFER,shadowFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,shadowTex,0);
+    glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+
+    // Light just below the ceiling so the ceiling is BEHIND the near clip
+    // plane (otherwise it would block the entire floor from "seeing" the light).
+    glm::mat4 lp=glm::ortho(-10.0f,10.0f,-10.0f,10.0f,0.3f,9.0f);
+    glm::mat4 lv=glm::lookAt(glm::vec3(-9,7.3f,0),glm::vec3(-9,0,0),glm::vec3(0,0,1));
+    lightSpaceMat=lp*lv;
+}
+
+// Draw opaque scene for shadow pass (uses shadow program already bound)
+static void shadowPassDraw(){
+    auto setModel=[&](const glm::mat4& m){
+        glUniformMatrix4fv(glGetUniformLocation(progShadow,"model"),1,GL_FALSE,glm::value_ptr(m));
+    };
+    glm::mat4 I(1);
+    setModel(I);
+    glBindVertexArray(floorVAO);   glDrawArrays(GL_TRIANGLES,0,floorN);
+    glBindVertexArray(wallVAO);    glDrawArrays(GL_TRIANGLES,0,wallN);
+    // Ceiling intentionally skipped - it sits between the light and the floor.
+    // Ball
+    setModel(glm::translate(I,ballPos));
+    glBindVertexArray(ballVAO); glDrawArrays(GL_TRIANGLES,0,ballN);
+    // Actor
+    setModel(glm::translate(I,actor.pos));
+    glBindVertexArray(actorVAO); glDrawArrays(GL_TRIANGLES,0,actorN);
+}
+
+// ---------------------------------------------------------------------------
+// Camera
+// ---------------------------------------------------------------------------
+static void updateCamera(){
+    glm::vec3 front;
+    front.x=cosf(glm::radians(cameraYaw))*cosf(glm::radians(cameraPitch));
+    front.y=sinf(glm::radians(cameraPitch));
+    front.z=sinf(glm::radians(cameraYaw))*cosf(glm::radians(cameraPitch));
+    front=glm::normalize(front);
+    glm::vec3 right=glm::normalize(glm::cross(front,{0,1,0}));
+    glm::vec3 up=glm::cross(right,front);
+    currentView=glm::lookAt(cameraPos,cameraPos+front,up);
+}
+
+static void processMovement(){
+    int now=glutGet(GLUT_ELAPSED_TIME);
+    float dt=std::min((now-lastTime)*0.001f,0.05f);
+    lastTime=now;
+    glm::vec3 front;
+    front.x=cosf(glm::radians(cameraYaw))*cosf(glm::radians(cameraPitch));
+    front.y=sinf(glm::radians(cameraPitch));
+    front.z=sinf(glm::radians(cameraYaw))*cosf(glm::radians(cameraPitch));
+    front=glm::normalize(front);
+    glm::vec3 right=glm::normalize(glm::cross(front,{0,1,0}));
+    float spd=moveSpeed*dt;
+    glm::vec3 mv(0);
+    if(keys['w']) mv+=front*spd;
+    if(keys['s']) mv-=front*spd;
+    if(keys['a']) mv-=right*spd;
+    if(keys['d']) mv+=right*spd;
+    if(keys['q']) mv.y+=spd;
+    if(keys['e']) mv.y-=spd;
+    if(glm::length(mv)>0){ cameraPos+=mv; glutPostRedisplay(); }
+}
+
+// ---------------------------------------------------------------------------
+// Lighting uniforms helper
+// ---------------------------------------------------------------------------
+static void setLightUniforms(GLuint prog){
+    glUniform3fv(glGetUniformLocation(prog,"lightPos"),  3,glm::value_ptr(lightPos[0]));
+    glUniform3fv(glGetUniformLocation(prog,"lightColor"),3,glm::value_ptr(lightColor[0]));
+    glUniform3fv(glGetUniformLocation(prog,"viewPos"),   1,glm::value_ptr(cameraPos));
+}
+
+// ---------------------------------------------------------------------------
+// Display
+// ---------------------------------------------------------------------------
+static int lastActor=0;
+static float totalTime=0;
+static float sceneTime=0.0f;
+
+void display(){
+    int now=glutGet(GLUT_ELAPSED_TIME);
+    float dt=std::min((now-lastActor)*0.001f,0.05f);
+    totalTime+=dt;
+    sceneTime+=dt;
+    lastActor=now;
+    updateActor(dt);
+    updateBall(dt);
+    updateParticles(dt);
+    processMovement();
+    updateCamera();
+
+    glm::mat4 proj=glm::perspective(glm::radians(60.0f),(float)windowWidth/windowHeight,0.1f,200.0f);
+    glm::mat4 I(1);
+
+    // ---- Shadow pass ----
+    glViewport(0,0,SM,SM);
+    glBindFramebuffer(GL_FRAMEBUFFER,shadowFBO);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glUseProgram(progShadow);
+    glUniformMatrix4fv(glGetUniformLocation(progShadow,"lightSpaceMat"),1,GL_FALSE,glm::value_ptr(lightSpaceMat));
+    shadowPassDraw();
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+
+    // ---- Main pass ----
+    glViewport(0,0,windowWidth,windowHeight);
+    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+
+    // -- Room (floor, wall, ceiling) --
+    glUseProgram(progRoom);
+    glUniformMatrix4fv(glGetUniformLocation(progRoom,"proj"),1,GL_FALSE,glm::value_ptr(proj));
+    glUniformMatrix4fv(glGetUniformLocation(progRoom,"view"),1,GL_FALSE,glm::value_ptr(currentView));
+    glUniformMatrix4fv(glGetUniformLocation(progRoom,"model"),1,GL_FALSE,glm::value_ptr(I));
+    glUniformMatrix4fv(glGetUniformLocation(progRoom,"lightSpaceMat"),1,GL_FALSE,glm::value_ptr(lightSpaceMat));
+    setLightUniforms(progRoom);
+    glUniform1i(glGetUniformLocation(progRoom,"useShadow"),1);
+    glUniform1f(glGetUniformLocation(progRoom,"sceneTime"),sceneTime);
+    // bind shadow map to unit 1
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D,shadowTex);
+    glUniform1i(glGetUniformLocation(progRoom,"shadowMap"),1);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(glGetUniformLocation(progRoom,"tex"),0);
+
+    glBindTexture(GL_TEXTURE_2D,floorTex);
+    glBindVertexArray(floorVAO); glDrawArrays(GL_TRIANGLES,0,floorN);
+
+    glBindTexture(GL_TEXTURE_2D,wallTex);
+    glBindVertexArray(wallVAO); glDrawArrays(GL_TRIANGLES,0,wallN);
+
+    glBindTexture(GL_TEXTURE_2D,ceilingTex);
+    glBindVertexArray(ceilingVAO); glDrawArrays(GL_TRIANGLES,0,ceilingN);
+
+    // -- Actor --
+    glUseProgram(progActor);
+    glUniformMatrix4fv(glGetUniformLocation(progActor,"proj"),1,GL_FALSE,glm::value_ptr(proj));
+    glUniformMatrix4fv(glGetUniformLocation(progActor,"view"),1,GL_FALSE,glm::value_ptr(currentView));
+    glm::mat4 actorM=glm::translate(I,actor.pos);
+    glUniformMatrix4fv(glGetUniformLocation(progActor,"model"),1,GL_FALSE,glm::value_ptr(actorM));
+    setLightUniforms(progActor);
+    glBindVertexArray(actorVAO); glDrawArrays(GL_TRIANGLES,0,actorN);
+
+    // -- Bouncing ball --
+    glm::mat4 ballM=glm::translate(I,ballPos);
+    glUniformMatrix4fv(glGetUniformLocation(progActor,"model"),1,GL_FALSE,glm::value_ptr(ballM));
+    glBindVertexArray(ballVAO); glDrawArrays(GL_TRIANGLES,0,ballN);
+
+    // -- Light orbs (emissive) --
+    glUseProgram(progEmit);
+    glUniformMatrix4fv(glGetUniformLocation(progEmit,"proj"),1,GL_FALSE,glm::value_ptr(proj));
+    glUniformMatrix4fv(glGetUniformLocation(progEmit,"view"),1,GL_FALSE,glm::value_ptr(currentView));
+    float pulse[3]={0.90f+0.10f*sinf(sceneTime*1.8f),
+                    1.0f,
+                    0.90f+0.10f*sinf(sceneTime*2.1f+1.0f)};
+    for(int i=0;i<3;i++){
+        glm::mat4 orbM=glm::translate(I,lightPos[i]);
+        glUniformMatrix4fv(glGetUniformLocation(progEmit,"model"),1,GL_FALSE,glm::value_ptr(orbM));
+        glm::vec3 ec=lightColor[i]*1.8f*pulse[i];
+        glUniform3fv(glGetUniformLocation(progEmit,"emitColor"),1,glm::value_ptr(ec));
+        glBindVertexArray(orbVAO); glDrawArrays(GL_TRIANGLES,0,orbN);
+    }
+
+    // -- Particles (fire) --
+    if(!particles.empty()){
+        std::vector<ParticleVert> pv;
+        for(const auto& p:particles){
+            float t=p.life/p.maxLife;
+            pv.push_back({p.pos.x,p.pos.y,p.pos.z, p.size, 1.0f, t*0.55f, 0.0f, t*0.9f});
+        }
+        glUseProgram(progParticle);
+        glUniformMatrix4fv(glGetUniformLocation(progParticle,"proj"),1,GL_FALSE,glm::value_ptr(proj));
+        glUniformMatrix4fv(glGetUniformLocation(progParticle,"view"),1,GL_FALSE,glm::value_ptr(currentView));
+        glBindVertexArray(partVAO);
+        glBindBuffer(GL_ARRAY_BUFFER,partVBO);
+        glBufferData(GL_ARRAY_BUFFER,pv.size()*sizeof(ParticleVert),pv.data(),GL_DYNAMIC_DRAW);
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+        glDepthMask(GL_FALSE); glEnable(GL_PROGRAM_POINT_SIZE);
+        glDrawArrays(GL_POINTS,0,(int)pv.size());
+        glDepthMask(GL_TRUE); glDisable(GL_BLEND); glDisable(GL_PROGRAM_POINT_SIZE);
+    }
+
+    // -- Glass panels (transparent, last) --
+    glUseProgram(progGlass);
+    glUniformMatrix4fv(glGetUniformLocation(progGlass,"proj"),1,GL_FALSE,glm::value_ptr(proj));
+    glUniformMatrix4fv(glGetUniformLocation(progGlass,"view"),1,GL_FALSE,glm::value_ptr(currentView));
+    glUniformMatrix4fv(glGetUniformLocation(progGlass,"model"),1,GL_FALSE,glm::value_ptr(I));
+    glUniformMatrix4fv(glGetUniformLocation(progGlass,"lightSpaceMat"),1,GL_FALSE,glm::value_ptr(lightSpaceMat));
+    setLightUniforms(progGlass);
+    glUniform1f(glGetUniformLocation(progGlass,"alpha"),0.35f);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glBindVertexArray(glassVAO); glDrawArrays(GL_TRIANGLES,0,glassN);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND);
 
     glutSwapBuffers();
-}
-
-// 鼠标回调
-void mouse(int button, int state, int x, int y) {
-    if (button == GLUT_LEFT_BUTTON) {
-        if (state == GLUT_DOWN) { mouseDown = true; mouseOldX = x; mouseOldY = y; }
-        else mouseDown = false;
-    }
-    else if (button == GLUT_RIGHT_BUTTON && state == GLUT_DOWN) {
-        cameraPos = glm::vec3(-8.0f, 2.5f, 0.0f);
-        cameraYaw = -90.0f; cameraPitch = 0.0f;
-        glutPostRedisplay();
-    }
-}
-
-void motion(int x, int y) {
-    if (!mouseDown) return;
-    int dx = x - mouseOldX, dy = y - mouseOldY;
-    cameraYaw += dx * 0.2f;
-    cameraPitch += dy * 0.2f;
-    if (cameraPitch > 89.0f) cameraPitch = 89.0f;
-    if (cameraPitch < -89.0f) cameraPitch = -89.0f;
-    mouseOldX = x; mouseOldY = y;
     glutPostRedisplay();
 }
 
-void keyboardDown(unsigned char key, int x, int y) {
-    keys[key] = true;
-    if (key == 27) exit(0);
-}
-void keyboardUp(unsigned char key, int x, int y) {
-    keys[key] = false;
-}
+// ---------------------------------------------------------------------------
+// GLUT callbacks
+// ---------------------------------------------------------------------------
+void reshape(int w,int h){ windowWidth=w; windowHeight=h; glViewport(0,0,w,h); }
 
-void reshape(int w, int h) {
-    windowWidth = w; windowHeight = h;
-    glViewport(0, 0, w, h);
+void mouse(int btn,int state,int x,int y){
+    if(btn==GLUT_LEFT_BUTTON){
+        if(state==GLUT_DOWN){mouseDown=true;mouseOldX=x;mouseOldY=y;}
+        else mouseDown=false;
+    } else if(btn==GLUT_RIGHT_BUTTON&&state==GLUT_DOWN){
+        cameraPos={-8,2.5f,0}; cameraYaw=-90; cameraPitch=0;
+    }
 }
-
-void initGL() {
-    glClearColor(0.2f, 0.2f, 0.2f, 1);
-    glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    lastTime = glutGet(GLUT_ELAPSED_TIME);
+void motion(int x,int y){
+    if(!mouseDown) return;
+    cameraYaw  +=(x-mouseOldX)*0.2f;
+    cameraPitch+=(y-mouseOldY)*0.2f;
+    cameraPitch=std::max(-89.0f,std::min(89.0f,cameraPitch));
+    mouseOldX=x; mouseOldY=y;
+    glutPostRedisplay();
 }
+void keyDown(unsigned char k,int,int){ keys[k]=true; if(k==27) exit(0); }
+void keyUp  (unsigned char k,int,int){ keys[k]=false; }
 
-int main(int argc, char** argv) {
-    glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
-    glutInitWindowSize(windowWidth, windowHeight);
-    glutCreateWindow("Two Rooms with Walking Actor");
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+int main(int argc,char** argv){
+    glutInit(&argc,argv);
+    glutInitDisplayMode(GLUT_DOUBLE|GLUT_RGB|GLUT_DEPTH);
+    glutInitWindowSize(windowWidth,windowHeight);
+    glutCreateWindow("CG Final Project");
     glewInit();
 
-    // 房间着色器
-    shaderProgram = createShaderProgram();
-    if (shaderProgram == 0) return 1;
-    glUseProgram(shaderProgram);
-    projectionLoc = glGetUniformLocation(shaderProgram, "projection");
-    modelviewLoc = glGetUniformLocation(shaderProgram, "modelview");
-    texLoc = glGetUniformLocation(shaderProgram, "tex");
+    glClearColor(0.05f,0.05f,0.08f,1);
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    lastTime=glutGet(GLUT_ELAPSED_TIME);
+    lastActor=lastTime;
 
-    floorTex = loadTexturePPM("floor.ppm");
-    wallTex = loadTexturePPM("wall.ppm");
-    ceilingTex = loadTexturePPM("ceiling.ppm");
-    if (floorTex == 0 || wallTex == 0 || ceilingTex == 0) {
-        std::cerr << "Failed to load floor.ppm, wall.ppm, or ceiling.ppm" << std::endl;
-        getchar();
-        return 1;
+    // Build programs
+    progRoom     = linkProg(roomVS,  roomFS);
+    progActor    = linkProg(actorVS, actorFS);
+    progEmit     = linkProg(emitVS,  emitFS);
+    progShadow   = linkProg(shadowVS,shadowFS);
+    progParticle = linkProg(partVS,  partFS);
+    progGlass    = linkProg(roomVS,  glassFS);
+
+    if(!progRoom||!progActor||!progEmit||!progShadow||!progParticle||!progGlass){
+        std::cerr<<"Shader compile failed\n"; getchar(); return 1;
     }
 
-    // 演员着色器
-    actorShader = createActorShader();
-    if (actorShader == 0) return 1;
-    glUseProgram(actorShader);
-    actorProjectionLoc = glGetUniformLocation(actorShader, "projection");
-    actorModelviewLoc = glGetUniformLocation(actorShader, "modelview");
+    // Load textures
+    floorTex   = loadTex("floor.ppm");
+    wallTex    = loadTex("wall.ppm");
+    ceilingTex = loadTex("ceiling.ppm");
+    if(!floorTex||!wallTex||!ceilingTex){
+        std::cerr<<"Failed to load textures\n"; getchar(); return 1;
+    }
 
-    // 构建场景和演员模型
+    // Build geometry
     buildScene();
-    createActorModel();
-    initPath();
-
-    floorVAO = createVAO(floorVerts);
-    ceilingVAO = createVAO(ceilingVerts);
-    wallVAO = createVAO(wallVerts);
-    floorVertCount = (int)floorVerts.size();
-    ceilingVertCount = (int)ceilingVerts.size();
-    wallVertCount = (int)wallVerts.size();
-
-    initGL();
+    buildActor();  initPath();
+    buildBall();
+    buildOrb();
+    initPartVAO();
+    initShadow();
 
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
-    glutKeyboardFunc(keyboardDown);
-    glutKeyboardUpFunc(keyboardUp);
+    glutKeyboardFunc(keyDown);
+    glutKeyboardUpFunc(keyUp);
     glutMouseFunc(mouse);
     glutMotionFunc(motion);
-    glutIdleFunc([]() { glutPostRedisplay(); });
+    glutIdleFunc([](){glutPostRedisplay();});
     glutMainLoop();
     return 0;
 }
