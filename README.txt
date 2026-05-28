@@ -1,1 +1,1 @@
-代码写在Assign0里面的assign0test.cpp，生成解决方案后打开Debug里面的Assign0.exe
+基于ispace上面的updatedAssign0.zip写的，压缩包里面的有些文件太大了传不上来，拉取Assign0文件夹和Assign0.sln以及Debug文件夹到解压后的lightdemo文件夹里面应该就行了，要在VS里面生成解决方案，然后Debug文件夹里面会生成exe文件
