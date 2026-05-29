@@ -262,17 +262,21 @@ uniform vec3 lightPos[3]; uniform vec3 lightColor[3]; uniform vec3 viewPos;
 uniform float alpha;
 void main(){
     vec3 n=normalize(fNorm); vec3 res=vec3(0);
+    float totalSp=0.0;
     for(int i=0;i<3;i++){
         vec3 ld=normalize(lightPos[i]-fPos);
         float d=length(lightPos[i]-fPos);
         float att=1.0/(1.0+0.07*d+0.017*d*d);
         vec3 vd=normalize(viewPos-fPos);
         vec3 hd=normalize(ld+vd);
-        float sp=pow(max(dot(n,hd),0.0),128.0);
-        res+=att*(0.05*lightColor[i]+sp*lightColor[i]*0.8);
+        float sp=pow(max(dot(n,hd),0.0),24.0);
+        res+=att*(0.06*lightColor[i]+sp*lightColor[i]*2.5);
+        totalSp+=att*sp;
     }
     vec3 glassCol=vec3(0.55,0.75,0.95);
-    fragColor=vec4(glassCol+res, alpha);
+    // Make the highlight area more opaque so it shows clearly through alpha blending.
+    float outA=clamp(alpha+totalSp*1.5, 0.0, 1.0);
+    fragColor=vec4(glassCol+res, outA);
 }
 )";
 
