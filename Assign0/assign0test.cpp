@@ -134,10 +134,11 @@ void main(){
         }
     }
 
-    // Dynamic light intensity: warm lights pulse (#1 extension)
-    vec3 lc0 = lightColor[0]*(0.90+0.10*sin(sceneTime*1.8));
+    // Dynamic light intensity: warm lights pulse (#1 extension).
+    // Synced with the emissive orb pulse in display() so they breathe together.
+    vec3 lc0 = lightColor[0]*(0.70+0.30*sin(sceneTime*1.8));
     vec3 lc1 = lightColor[1];
-    vec3 lc2 = lightColor[2]*(0.90+0.10*sin(sceneTime*2.1+1.0));
+    vec3 lc2 = lightColor[2]*(0.70+0.30*sin(sceneTime*2.1+1.0));
 
     vec3 result = vec3(0);
     for(int i=0;i<3;i++){
@@ -852,13 +853,15 @@ void display(){
     glUseProgram(progEmit);
     glUniformMatrix4fv(glGetUniformLocation(progEmit,"proj"),1,GL_FALSE,glm::value_ptr(proj));
     glUniformMatrix4fv(glGetUniformLocation(progEmit,"view"),1,GL_FALSE,glm::value_ptr(currentView));
-    float pulse[3]={0.90f+0.10f*sinf(sceneTime*1.8f),
-                    1.0f,
-                    0.90f+0.10f*sinf(sceneTime*2.1f+1.0f)};
+    // Pulse range [0.40, 1.00] so the orb visibly breathes — the previous
+    // 1.8x base saturated everything to white and hid the modulation.
+    float pulse[3]={0.70f+0.30f*sinf(sceneTime*1.8f),
+                    0.95f,
+                    0.70f+0.30f*sinf(sceneTime*2.1f+1.0f)};
     for(int i=0;i<3;i++){
         glm::mat4 orbM=glm::translate(I,lightPos[i]);
         glUniformMatrix4fv(glGetUniformLocation(progEmit,"model"),1,GL_FALSE,glm::value_ptr(orbM));
-        glm::vec3 ec=lightColor[i]*1.8f*pulse[i];
+        glm::vec3 ec=lightColor[i]*pulse[i];
         glUniform3fv(glGetUniformLocation(progEmit,"emitColor"),1,glm::value_ptr(ec));
         glBindVertexArray(orbVAO); glDrawArrays(GL_TRIANGLES,0,orbN);
     }
