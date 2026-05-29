@@ -146,8 +146,8 @@ void main(){
         vec3 dif = df*lc*tc;
         vec3 vd  = normalize(viewPos-fPos);
         vec3 hd  = normalize(ld+vd);
-        float sp = pow(max(dot(n,hd),0.0),64.0);
-        vec3 spec= sp*lc*0.35;
+        float sp = pow(max(dot(n,hd),0.0),32.0);
+        vec3 spec= sp*lc*1.2;
         float sh = (i==0 && useShadow) ? shadowFactor(fPosLS,n,ld)*0.7 : 0.0;
         result  += amb + att*(1.0-sh)*(dif+spec);
     }
@@ -189,7 +189,7 @@ void main(){
         vec3 vd=normalize(viewPos-fPos);
         vec3 hd=normalize(ld+vd);
         float sp=pow(max(dot(n,hd),0.0),32.0);
-        vec3 spec=sp*lightColor[i]*0.5;
+        vec3 spec=sp*lightColor[i]*1.2;
         res+=amb+att*(dif+spec);
     }
     fragColor=vec4(res,1);
