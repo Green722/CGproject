@@ -113,7 +113,8 @@ void main(){
     if(n.y > 0.7) uv += vec2(sceneTime*0.012, sceneTime*0.007);
     vec3 tc = texture(tex, uv).rgb;
 
-    // Bump mapping (#8): procedural normal perturbation on walls
+    // Bump mapping (#8): procedural normal perturbation on walls.
+    // Combines a coarse "brick" wave with a finer "grain" pattern.
     if(abs(n.y) < 0.3){
         vec3 dp1 = dFdx(fPos);
         vec3 dp2 = dFdy(fPos);
@@ -124,9 +125,12 @@ void main(){
             float s = 1.0/det;
             vec3 T = normalize(s*(duv2.y*dp1 - duv1.y*dp2));
             vec3 B = normalize(s*(-duv2.x*dp1 + duv1.x*dp2));
-            float dhdu = cos(fUV.x*28.0)*sin(fUV.y*28.0)*28.0;
-            float dhdv = sin(fUV.x*28.0)*cos(fUV.y*28.0)*28.0;
-            n = normalize(n + 0.035*(dhdu*T + dhdv*B));
+            // Coarse bumps (~big stones) + fine grain
+            float dhdu = cos(fUV.x*10.0)*sin(fUV.y*10.0)*10.0
+                       + cos(fUV.x*40.0)*sin(fUV.y*40.0)*10.0;
+            float dhdv = sin(fUV.x*10.0)*cos(fUV.y*10.0)*10.0
+                       + sin(fUV.x*40.0)*cos(fUV.y*40.0)*10.0;
+            n = normalize(n + 0.12*(dhdu*T + dhdv*B));
         }
     }
 
